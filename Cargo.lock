@@ -4504,6 +4504,7 @@ dependencies = [
  "reqwest",
  "rfd",
  "rmcp",
+ "serde",
  "serde_json",
  "tokio",
 ]

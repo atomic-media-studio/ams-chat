@@ -6,15 +6,23 @@ meta {
 
 post {
   url: http://127.0.0.1:3000/
-  body: text
+  body: json
   auth: none
 }
 
 headers {
-  Content-Type: text/plain
+  Content-Type: application/json
 }
 
-body:text {
-  Hello from Bruno
+body:json {
+  {
+    "sender_id": 1,
+    "sender_name": "Agent 1",
+    "receiver_id": 2,
+    "receiver_name": "Agent 2",
+    "topic": "Test Topic",
+    "message": "Hello from Bruno with agent name",
+    "timestamp": "2024-01-15T10:30:00Z"
+  }
 }
 

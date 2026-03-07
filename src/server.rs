@@ -10,8 +10,21 @@ use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use tokio::net::TcpListener;
 use std::sync::mpsc;
+use serde::{Deserialize, Serialize};
 
 use crate::chat::ChatMessage;
+
+// Conversation message format from web-agents
+#[derive(Serialize, Deserialize, Debug)]
+struct ConversationMessage {
+    sender_id: usize,
+    sender_name: String,
+    receiver_id: usize,
+    receiver_name: String,
+    topic: String,
+    message: String,
+    timestamp: String,
+}
 
 /// Start the HTTP server that receives POST requests
 pub async fn start_server(
@@ -67,15 +80,28 @@ async fn handle_request(
                 }
             };
 
-            // Try to parse as JSON or use as plain text
+            // Try to parse as JSON first, then fall back to plain text
             let body_str = String::from_utf8_lossy(&body_bytes);
             println!("Received POST request: {}", body_str);
 
-            // Create a chat message from the POST data
-            // You can customize this to parse JSON if needed
-            let message = ChatMessage {
-                content: body_str.to_string(),
-                from: Some("API".to_string()),
+            // Try to parse as ConversationMessage JSON format
+            let message = match serde_json::from_str::<ConversationMessage>(&body_str) {
+                Ok(conv_msg) => {
+                    // Successfully parsed JSON - use sender_name and message
+                    println!("Parsed JSON message from: {}", conv_msg.sender_name);
+                    ChatMessage {
+                        content: conv_msg.message,
+                        from: Some(conv_msg.sender_name),
+                    }
+                }
+                Err(_) => {
+                    // Not valid JSON or different format - treat as plain text
+                    // Try to extract sender name if it's a simple format, otherwise use "API"
+                    ChatMessage {
+                        content: body_str.to_string(),
+                        from: Some("API".to_string()),
+                    }
+                }
             };
 
             // Send message to the chat UI via sender
