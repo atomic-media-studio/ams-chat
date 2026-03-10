@@ -149,9 +149,9 @@ impl ChatExample {
                                         _ => egui::Color32::TRANSPARENT, // No border for other messages
                                     };
                                     
-                                    let border_width = if border_color != egui::Color32::TRANSPARENT { 2.0 } else { 0.0 };
+                                    let border_width = if border_color != egui::Color32::TRANSPARENT { 1.0 } else { 0.0 };
 
-                                    let rounding = 8.0;
+                                    let rounding = 4.0;
                                     let margin = 8.0;
                                     // 4px spacing between messages
                                     let outer_margin = egui::Margin {
