@@ -3,7 +3,6 @@ use egui::{Align, Frame, Layout};
 
 use crate::chat::ChatExample;
 use crate::ollama::{OllamaController, OllamaStatus};
-use crate::mcp::{MCPController, MCPStatus};
 
 use std::sync::{Arc, Mutex};
 
@@ -21,7 +20,6 @@ pub struct MyApp {
     chat_token_limit_enabled: bool,
     chat_use_mode: ChatUseMode,
     download_chat_format: DownloadChatFormat,
-    pub mcp: MCPController,
     left_column_tab: LeftColumnTab,
 }
 
@@ -57,13 +55,7 @@ impl Default for MyApp {
         let ollama = OllamaController::new();
         ollama.check_status(); // Check Ollama status on startup
         ollama.fetch_models(); // Fetch available models on startup
-        let mcp = MCPController::new();
-        mcp.set_ollama(ollama.clone());
-        // MCP starts enabled by default, but we need to wait for chat sender to be set
-        // before actually starting the server (which happens in main.rs)
-        
-        // Note: chat_sender will be set in main.rs after chat is created
-        
+
         Self {
             chat: ChatExample::default(),
             selected_model: String::new(),
@@ -78,7 +70,6 @@ impl Default for MyApp {
             chat_token_limit_enabled: false,
             chat_use_mode: ChatUseMode::default(),
             download_chat_format: DownloadChatFormat::default(),
-            mcp,
             left_column_tab: LeftColumnTab::default(),
         }
     }
@@ -273,7 +264,7 @@ impl eframe::App for MyApp {
                                             ui.vertical(|ui| {
                                                 
                                                 // Server Status
-                                                ui.label(egui::RichText::new("Server Status").strong());
+                                                ui.label(egui::RichText::new("HTTP Server Status").strong());
                                                 ui.add_space(4.0);
                                                 
                                                 let (status_text, status_color) = match self.server_status {
@@ -335,6 +326,13 @@ impl eframe::App for MyApp {
                                             ui.add_space(2.0);
                                             ui.label(egui::RichText::new("http://127.0.0.1:11434").small().weak());
                                             ui.add_space(4.0);
+
+                                            ui.separator();
+                                            ui.add_space(4.0);
+
+                                            ui.label(egui::RichText::new("Test Ollama API").strong());
+                                            ui.add_space(4.0);
+
 
                                             // Model combobox
                                             let models = self.ollama.models();
@@ -414,38 +412,10 @@ impl eframe::App for MyApp {
                                             });
                                         });
 
-                                    ui.add_space(8.0);
-                                    ui.separator();
-                                    ui.add_space(8.0);
-
-                                    // MCP Status with green border
-                                    egui::Frame::default()
-                                        .inner_margin(egui::Margin { left: 6.0, right: 6.0, top: 6.0, bottom: 6.0 })
-                                        .rounding(4.0)
-                                        .show(ui, |ui| {
-                                            ui.vertical(|ui| {
-                                                ui.label(egui::RichText::new("MCP Status").strong());
-                                                ui.add_space(4.0);
-                                                let mcp_status = self.mcp.status();
-                                                let (mcp_status_text, mcp_status_color) = match mcp_status {
-                                                    MCPStatus::Running => ("● Running", egui::Color32::WHITE),
-                                                    MCPStatus::Stopped => ("● Stopped", egui::Color32::GRAY),
-                                                    MCPStatus::Checking => ("● Checking", egui::Color32::GRAY),
-                                                };
-                                                ui.label(egui::RichText::new(mcp_status_text).color(mcp_status_color));
-                                                ui.add_space(4.0);
-                                                let is_enabled = *self.mcp.enabled().lock().unwrap();
-                                                let button_text = if is_enabled { "OFF" } else { "ON" };
-                                                if ui.button(button_text).clicked() {
-                                                    let new_state = !is_enabled;
-                                                    self.mcp.set_enabled(new_state);
-                                                }
-                                            });
-                                        });
                                 }
                                 LeftColumnTab::About => {
                                     ui.vertical(|ui| {
-                                        ui.label("web-chat");
+                                        ui.label("ams-chat");
                                     });
                                 }
                             }
@@ -511,7 +481,7 @@ impl eframe::App for MyApp {
                                 if selected_model.is_empty() {
                                     // No model selected, respond with "Please select a model"
                                     let bot_message = crate::chat::ChatMessage {
-                                        content: "web-chat Started".to_string(),
+                                        content: "ams-chat Started".to_string(),
                                         from: Some("System".to_string()),
                                     };
                                     tx_clone.send(bot_message).ok();

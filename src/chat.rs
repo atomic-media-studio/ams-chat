@@ -61,7 +61,7 @@ impl ChatExample {
         // Load initial message from history
         let initial_messages = vec![
             ChatMessage {
-                content: "web-chat Started".to_string(),
+                content: "ams-chat Started".to_string(),
                 from: Some("System".to_string()),
             }
         ];

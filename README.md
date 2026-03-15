@@ -1,4 +1,4 @@
-# web-chat
+# ams-chat
 
 A controllable chat application in Rust
 

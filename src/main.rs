@@ -2,7 +2,6 @@ mod app;
 mod chat;
 mod server;
 mod ollama;
-mod mcp;
 
 use std::net::SocketAddr;
 use std::sync::{mpsc, Arc, Mutex};
@@ -50,21 +49,12 @@ fn main() -> eframe::Result<()> {
 
     let server_enabled_for_app = server_enabled.clone();
     eframe::run_native(
-        "web-chat",
+        "ams-chat",
         options,
         Box::new(move |_cc| {
             let mut app = MyApp::default();
             app.chat = chat;
             app.server_enabled = server_enabled_for_app;
-            // Connect MCP to chat using callback - no direct dependency
-            let chat_inbox_sender = app.chat.inbox().sender();
-            app.mcp.set_chat_sender_fn(Arc::new(move |msg: crate::chat::ChatMessage| {
-                chat_inbox_sender.send(msg).ok();
-            }));
-            // Start MCP server if enabled (it's enabled by default)
-            if *app.mcp.enabled().lock().unwrap() {
-                app.mcp.set_enabled(true);
-            }
             Ok(Box::new(app))
         }),
     )
