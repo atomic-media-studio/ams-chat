@@ -8,7 +8,7 @@ use time::OffsetDateTime;
 
 use crate::incoming::{should_dispatch_to_model, MessageSource};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct MessageCorrelation {
     /// Carried for audit/export; IDs are also written to JSONL from server/ollama paths.
     #[allow(dead_code)]
@@ -20,6 +20,13 @@ pub struct MessageCorrelation {
     pub timestamp_rfc3339: String,
 }
 
+/// Ollama generation metadata attached to assistant lines (for SQLite replay).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct AssistantGeneration {
+    pub model: String,
+    pub num_predict: Option<i32>,
+}
+
 #[derive(Debug, Clone)]
 pub struct ChatMessage {
     pub content: String,
@@ -28,29 +35,20 @@ pub struct ChatMessage {
     pub source: MessageSource,
     /// For [`MessageSource::Api`] only: when `true`, run the same Ollama pipeline as UI input. Default `false`.
     pub api_auto_respond: bool,
-}
-
-#[derive(Debug)]
-struct HistoryLoader {
-    // Placeholder struct for future history loading functionality
-}
-
-impl HistoryLoader {
-    pub fn new() -> Self {
-        Self {}
-    }
+    /// Set for assistant replies produced via Ollama (persisted for reproducibility).
+    pub assistant_generation: Option<AssistantGeneration>,
 }
 
 pub type MessageHandler = Box<dyn Fn(String) + Send + Sync>;
+pub type MessageCommitHook = Box<dyn Fn(&ChatMessage, &str) + Send + Sync>;
 
 pub struct ChatExample {
     messages: Vec<ChatMessage>, // Simple Vec instead of InfiniteScroll
     message_timestamps: Vec<String>,
     inbox: UiInbox<ChatMessage>,
-    #[allow(dead_code)]
-    history_loader: Arc<HistoryLoader>,
     input_text: String,
     message_handler: Option<MessageHandler>,
+    message_commit_hook: Option<MessageCommitHook>,
     waiting_for_response: Arc<std::sync::Mutex<bool>>,
     picked_file_path: Option<String>,
     main_input_enabled: bool,
@@ -85,31 +83,49 @@ impl ChatExample {
         Self::current_timestamp_string()
     }
 
-    pub fn new() -> Self {
-        let history_loader = Arc::new(HistoryLoader::new());
-        let inbox = UiInbox::new();
-        
-        // Load initial message from history
-        let initial_messages = vec![
-            ChatMessage {
-                content: "ams-chat Started".to_string(),
-                from: Some("System".to_string()),
-                correlation: None,
-                source: MessageSource::System,
-                api_auto_respond: false,
-            }
-        ];
+    /// Default welcome line when no SQLite history exists.
+    pub fn default_welcome() -> (ChatMessage, String) {
+        let msg = ChatMessage {
+            content: "ams-chat Started".to_string(),
+            from: Some("System".to_string()),
+            correlation: None,
+            source: MessageSource::System,
+            api_auto_respond: false,
+            assistant_generation: None,
+        };
+        let ts = Self::display_time_for_message(&msg);
+        (msg, ts)
+    }
 
+    pub fn new() -> Self {
+        let inbox = UiInbox::new();
+        let (welcome, ts) = Self::default_welcome();
         ChatExample {
-            messages: initial_messages,
-            message_timestamps: vec![Self::current_timestamp_string()],
+            messages: vec![welcome],
+            message_timestamps: vec![ts],
             inbox,
-            history_loader,
             input_text: String::new(),
             message_handler: None,
+            message_commit_hook: None,
             waiting_for_response: Arc::new(std::sync::Mutex::new(false)),
             picked_file_path: None,
             main_input_enabled: true,
+        }
+    }
+
+    /// Replace chat lines (e.g. after loading from SQLite).
+    pub fn hydrate(&mut self, messages: Vec<ChatMessage>, message_timestamps: Vec<String>) {
+        self.messages = messages;
+        self.message_timestamps = message_timestamps;
+    }
+
+    pub fn set_message_commit_hook(&mut self, hook: Option<MessageCommitHook>) {
+        self.message_commit_hook = hook;
+    }
+
+    fn commit_message(&mut self, msg: &ChatMessage, display_ts: &str) {
+        if let Some(hook) = &self.message_commit_hook {
+            hook(msg, display_ts);
         }
     }
 
@@ -151,9 +167,17 @@ impl ChatExample {
             .collect()
     }
 
+    #[allow(dead_code)]
     pub fn clear_messages(&mut self) {
         self.messages.clear();
         self.message_timestamps.clear();
+    }
+
+    /// Reset the transcript to the default welcome line (e.g. after clearing SQLite rows).
+    pub fn reset_to_welcome(&mut self) {
+        let (w, t) = Self::default_welcome();
+        self.messages = vec![w];
+        self.message_timestamps = vec![t];
     }
 
     pub fn ui(&mut self, ui: &mut Ui) {
@@ -163,8 +187,10 @@ impl ChatExample {
                 let ts = Self::display_time_for_message(&message);
                 let run_handler = should_dispatch_to_model(message.source, message.api_auto_respond);
                 let text_for_model = message.content.clone();
+                let persisted = message.clone();
                 self.messages.push(message);
-                self.message_timestamps.push(ts);
+                self.message_timestamps.push(ts.clone());
+                self.commit_message(&persisted, &ts);
                 if run_handler {
                     if let Some(handler) = &self.message_handler {
                         handler(text_for_model);
@@ -413,9 +439,13 @@ impl ChatExample {
                                     correlation: None,
                                     source: MessageSource::Human,
                                     api_auto_respond: false,
+                                    assistant_generation: None,
                                 };
+                                let ts = Self::current_timestamp_string();
+                                let persisted = user_message.clone();
                                 self.messages.push(user_message);
-                                self.message_timestamps.push(Self::current_timestamp_string());
+                                self.message_timestamps.push(ts.clone());
+                                self.commit_message(&persisted, &ts);
 
                                 // Use message handler if available, otherwise use default behavior
                                 if let Some(handler) = &self.message_handler {
@@ -429,6 +459,7 @@ impl ChatExample {
                                         correlation: None,
                                         source: MessageSource::System,
                                         api_auto_respond: false,
+                                        assistant_generation: None,
                                     };
                                     tx.send(bot_message).ok();
                                 }

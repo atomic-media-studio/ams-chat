@@ -5,6 +5,7 @@ use crate::audit::AuditHandle;
 use crate::chat::ChatExample;
 use crate::incoming::MessageSource;
 use crate::ollama::{OllamaController, OllamaStatus};
+use crate::store::{ConversationSettings, ConversationSummary, Store};
 
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -12,8 +13,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub struct MyApp {
     pub chat: ChatExample,
     pub selected_model: String,
-    pub conversation_id: String,
+    /// Active conversation; shared with the HTTP server for inbound message attribution.
+    pub conversation_id: Arc<Mutex<String>>,
+    pub store: Arc<Store>,
     pub audit: Arc<AuditHandle>,
+    conversation_list: Vec<ConversationSummary>,
+    conversation_pick: String,
+    last_saved_settings: Option<ConversationSettings>,
     server_status: ServerStatus,
     pub server_enabled: Arc<Mutex<bool>>,
     /// Set once on first frame so Catppuccin Latte replaces default dark styling.
@@ -69,8 +75,12 @@ impl Default for MyApp {
         Self {
             chat: ChatExample::default(),
             selected_model: String::new(),
-            conversation_id: String::new(),
+            conversation_id: Arc::new(Mutex::new(String::new())),
+            store: Arc::new(Store::open(":memory:").expect("in-memory store")),
             audit: Arc::new(crate::audit::AuditHandle::disabled()),
+            conversation_list: Vec::new(),
+            conversation_pick: String::new(),
+            last_saved_settings: None,
             server_status: ServerStatus::Running, // Assume running since server starts before UI
             server_enabled: Arc::new(Mutex::new(true)),
             theme_applied: false,
@@ -92,6 +102,73 @@ impl Default for MyApp {
 }
 
 impl MyApp {
+    pub fn conv_id(&self) -> String {
+        self.conversation_id.lock().unwrap().clone()
+    }
+
+    pub fn apply_loaded_settings(&mut self, s: ConversationSettings) {
+        self.selected_model = s.selected_model.clone();
+        *self.selected_ollama_model.lock().unwrap() = s.selected_model.clone();
+        self.chat_token_limit = s.chat_token_limit;
+        self.chat_token_limit_enabled = s.chat_token_limit_enabled;
+        self.ollama_token_limit = s.ollama_token_limit;
+        self.ollama_token_limit_enabled = s.ollama_token_limit_enabled;
+        self.last_saved_settings = Some(s);
+    }
+
+    fn switch_to_conversation(&mut self, id: &str) {
+        match self.store.load_messages(id) {
+            Ok((msgs, ts)) => {
+                *self.conversation_id.lock().unwrap() = id.to_string();
+                self.conversation_pick = id.to_string();
+                self.chat.hydrate(msgs, ts);
+                if let Ok(s) = self.store.load_conversation_settings(id) {
+                    self.apply_loaded_settings(s);
+                }
+            }
+            Err(e) => tracing::warn!(error = %e, "load messages"),
+        }
+    }
+
+    fn close_conversation_tab(&mut self, id: &str) {
+        if let Err(e) = self.store.delete_conversation(id) {
+            tracing::warn!(error = %e, "delete conversation");
+            return;
+        }
+        if self.conv_id() != id {
+            return;
+        }
+        match self.store.most_recent_conversation_id() {
+            Ok(Some(new_id)) => {
+                self.switch_to_conversation(&new_id);
+            }
+            Ok(None) => match self.store.create_conversation() {
+                Ok(new_id) => {
+                    *self.conversation_id.lock().unwrap() = new_id.clone();
+                    self.conversation_pick = new_id.clone();
+                    self.chat.reset_to_welcome();
+                    let (w, t) = ChatExample::default_welcome();
+                    let _ = self.store.append_message(&new_id, &w, &t);
+                    if let Ok(s) = self.store.load_conversation_settings(&new_id) {
+                        self.apply_loaded_settings(s);
+                    }
+                }
+                Err(e) => tracing::warn!(error = %e, "create conversation after close"),
+            },
+            Err(e) => tracing::warn!(error = %e, "most_recent_conversation_id"),
+        }
+    }
+
+    fn snapshot_settings(&self) -> ConversationSettings {
+        ConversationSettings {
+            selected_model: self.selected_model.clone(),
+            chat_token_limit: self.chat_token_limit,
+            chat_token_limit_enabled: self.chat_token_limit_enabled,
+            ollama_token_limit: self.ollama_token_limit,
+            ollama_token_limit_enabled: self.ollama_token_limit_enabled,
+        }
+    }
+
     fn current_timestamp_string() -> String {
         let now_secs = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -109,7 +186,32 @@ impl eframe::App for MyApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         if !self.theme_applied {
             catppuccin_egui::set_theme(ctx, catppuccin_egui::LATTE);
+            let mut fonts = egui::FontDefinitions::default();
+            egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
+            ctx.set_fonts(fonts);
             self.theme_applied = true;
+        }
+
+        self.conversation_list = self.store.list_conversations(50).unwrap_or_default();
+        if self.conversation_pick.is_empty() {
+            self.conversation_pick = self.conv_id();
+        }
+
+        let store_commit = self.store.clone();
+        let conv_arc = self.conversation_id.clone();
+        self.chat.set_message_commit_hook(Some(Box::new(move |msg, ts| {
+            let id = conv_arc.lock().unwrap().clone();
+            if let Err(e) = store_commit.append_message(&id, msg, ts) {
+                tracing::warn!(error = %e, "sqlite persist failed");
+            }
+        })));
+
+        let snap = self.snapshot_settings();
+        if self.last_saved_settings.as_ref() != Some(&snap) {
+            if let Err(e) = self.store.save_conversation_settings(&self.conv_id(), &snap) {
+                tracing::warn!(error = %e, "sqlite settings save failed");
+            }
+            self.last_saved_settings = Some(snap);
         }
 
         if self.keyboard_recording {
@@ -427,8 +529,97 @@ impl eframe::App for MyApp {
                                                     });
                                                 });
                                             ui.add_space(4.0);
-                                            if ui.button("Clear Chat").clicked() {
-                                                self.chat.clear_messages();
+                                            ui.label(egui::RichText::new("Conversations").small().strong());
+                                            ui.horizontal(|ui| {
+                                                if ui.button("New").clicked() {
+                                                    match self.store.create_conversation() {
+                                                        Ok(id) => {
+                                                            *self.conversation_id.lock().unwrap() = id.clone();
+                                                            self.conversation_pick = id.clone();
+                                                            self.chat.reset_to_welcome();
+                                                            let (w, t) = ChatExample::default_welcome();
+                                                            let _ = self.store.append_message(&id, &w, &t);
+                                                            if let Ok(s) = self.store.load_conversation_settings(&id) {
+                                                                self.apply_loaded_settings(s);
+                                                            }
+                                                        }
+                                                        Err(e) => tracing::warn!(error = %e, "create conversation"),
+                                                    }
+                                                }
+                                                egui::ComboBox::from_id_salt("conv_pick")
+                                                    .width(120.0)
+                                                    .selected_text(if self.conversation_pick.len() > 8 {
+                                                        format!("{}…", &self.conversation_pick[..8])
+                                                    } else {
+                                                        self.conversation_pick.clone()
+                                                    })
+                                                    .show_ui(ui, |ui| {
+                                                        let conv_list = self.conversation_list.clone();
+                                                        for c in &conv_list {
+                                                            let label = if c.id.len() > 8 {
+                                                                format!(
+                                                                    "{}… · {}",
+                                                                    &c.id[..8],
+                                                                    &c.updated_at
+                                                                )
+                                                            } else {
+                                                                format!("{} · {}", c.id, c.updated_at)
+                                                            };
+                                                            if ui
+                                                                .selectable_label(self.conv_id() == c.id, label)
+                                                                .clicked()
+                                                            {
+                                                                self.switch_to_conversation(&c.id);
+                                                            }
+                                                        }
+                                                    });
+                                            });
+                                            ui.horizontal(|ui| {
+                                                if ui.button("Export JSON…").clicked() {
+                                                    match self.store.export_conversation_json(&self.conv_id()) {
+                                                        Ok(json) => {
+                                                            if let Some(path) = rfd::FileDialog::new()
+                                                                .set_file_name("conversation.json")
+                                                                .save_file()
+                                                            {
+                                                                if let Err(err) = std::fs::write(path, json) {
+                                                                    tracing::warn!(error = %err, "export write");
+                                                                }
+                                                            }
+                                                        }
+                                                        Err(e) => tracing::warn!(error = %e, "export"),
+                                                    }
+                                                }
+                                                if ui.button("Import JSON…").clicked() {
+                                                    if let Some(path) = rfd::FileDialog::new().pick_file() {
+                                                        match std::fs::read_to_string(path) {
+                                                            Ok(s) => {
+                                                                match self.store.import_conversation_json(&s) {
+                                                                    Ok(new_id) => {
+                                                                        *self.conversation_id.lock().unwrap() =
+                                                                            new_id.clone();
+                                                                        self.conversation_pick = new_id.clone();
+                                                                        match self.store.load_messages(&new_id) {
+                                                                            Ok((m, t)) => {
+                                                                                self.chat.hydrate(m, t);
+                                                                            }
+                                                                            Err(e) => tracing::warn!(error = %e, "load after import"),
+                                                                        }
+                                                                    }
+                                                                    Err(e) => tracing::warn!(error = %e, "import"),
+                                                                }
+                                                            }
+                                                            Err(e) => tracing::warn!(error = %e, "read import file"),
+                                                        }
+                                                    }
+                                                }
+                                            });
+                                            if ui.button("Clear chat").clicked() {
+                                                let id = self.conv_id();
+                                                let _ = self.store.delete_messages_for_conversation(&id);
+                                                self.chat.reset_to_welcome();
+                                                let (w, t) = ChatExample::default_welcome();
+                                                let _ = self.store.append_message(&id, &w, &t);
                                             }
                                         });
 
@@ -577,6 +768,7 @@ impl eframe::App for MyApp {
                                                         correlation: None,
                                                         source: MessageSource::System,
                                                         api_auto_respond: false,
+                                                        assistant_generation: None,
                                                     };
                                                     tx.send(system_message).ok();
                                                     let request_id = crate::audit::new_id();
@@ -585,7 +777,7 @@ impl eframe::App for MyApp {
                                                         message,
                                                         token_limit,
                                                         self.audit.clone(),
-                                                        self.conversation_id.clone(),
+                                                        self.conv_id(),
                                                         request_id,
                                                         Box::new(move |msg| {
                                                             tx.send(msg).ok();
@@ -609,13 +801,69 @@ impl eframe::App for MyApp {
                     },
                 );
 
-                // Center column - 60% width (chat area only)
-                ui.vertical(|ui| {
-                    ui.set_min_width(center_width);
-                    ui.set_max_width(center_width);
+                // Center column - 60% width: conversation tabs (intrinsic height) + chat (remainder)
+                ui.allocate_ui_with_layout(
+                    egui::vec2(center_width, content_height),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                    ui.set_min_height(content_height);
+                    ui.set_width(center_width);
 
-                    // Chat area - full height
-                    let chat_area_height = content_height;
+                    Frame::default()
+                        .fill(panel_fill)
+                        .stroke(panel_border)
+                        .corner_radius(4.0)
+                        .inner_margin(egui::Margin::symmetric(6, 4))
+                        .outer_margin(0.0)
+                        .show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            ui.set_max_height(36.0);
+                            egui::ScrollArea::horizontal()
+                                .max_height(32.0)
+                                .auto_shrink([true, true])
+                                .show(ui, |ui| {
+                                    ui.horizontal(|ui| {
+                                        ui.spacing_mut().item_spacing.x = 6.0;
+                                        let conv_list = self.conversation_list.clone();
+                                        if conv_list.is_empty() {
+                                            ui.label(
+                                                egui::RichText::new("No chats — create one in the sidebar")
+                                                    .small()
+                                                    .weak(),
+                                            );
+                                        } else {
+                                            for c in &conv_list {
+                                                let short = if c.id.len() > 12 {
+                                                    format!("{}…", &c.id[..12])
+                                                } else {
+                                                    c.id.clone()
+                                                };
+                                                let selected = self.conv_id() == c.id;
+                                                let cid = c.id.clone();
+                                                ui.push_id(&cid, |ui| {
+                                                    ui.horizontal(|ui| {
+                                                        ui.spacing_mut().item_spacing.x = 2.0;
+                                                        if ui.selectable_label(selected, short).clicked() {
+                                                            self.switch_to_conversation(&cid);
+                                                        }
+                                                        if ui
+                                                            .small_button(egui_phosphor::regular::X)
+                                                            .on_hover_text("Close conversation")
+                                                            .clicked()
+                                                        {
+                                                            self.close_conversation_tab(&cid);
+                                                        }
+                                                    });
+                                                });
+                                            }
+                                        }
+                                    });
+                                });
+                        });
+
+                    ui.add_space(4.0);
+
+                    let chat_body_height = ui.available_height().max(0.0);
                     Frame::default()
                         .fill(panel_fill)
                         .stroke(panel_border)
@@ -625,7 +873,7 @@ impl eframe::App for MyApp {
                         .show(ui, |ui| {
                             ui.set_min_width(center_width);
                             ui.set_max_width(center_width);
-                            ui.set_height(chat_area_height);
+                            ui.set_height(chat_body_height);
                             
                             // Set up message handler for chat with current values
                             // Update each frame to ensure we have the latest model selection and settings
@@ -652,6 +900,7 @@ impl eframe::App for MyApp {
                                         correlation: None,
                                         source: MessageSource::System,
                                         api_auto_respond: false,
+                                        assistant_generation: None,
                                     };
                                     tx_clone.send(bot_message).ok();
                                 } else if ollama_status == crate::ollama::OllamaStatus::Running {
@@ -668,7 +917,7 @@ impl eframe::App for MyApp {
                                         message,
                                         chat_token_limit,
                                         audit_for_chat.clone(),
-                                        conversation_for_chat.clone(),
+                                        conversation_for_chat.lock().unwrap().clone(),
                                         request_id,
                                         Box::new(move |msg| {
                                             // Clear waiting flag when response arrives
@@ -684,6 +933,7 @@ impl eframe::App for MyApp {
                                         correlation: None,
                                         source: MessageSource::System,
                                         api_auto_respond: false,
+                                        assistant_generation: None,
                                     };
                                     tx_clone.send(bot_message).ok();
                                 }

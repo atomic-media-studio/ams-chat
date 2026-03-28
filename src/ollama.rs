@@ -2,7 +2,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::audit::{self, AuditHandle, AuditRecord, SCHEMA_VERSION};
-use crate::chat::{ChatMessage, MessageCorrelation};
+use crate::chat::{AssistantGeneration, ChatMessage, MessageCorrelation};
 use crate::incoming::MessageSource;
 
 const OLLAMA_URL: &str = "http://127.0.0.1:11434";
@@ -12,6 +12,7 @@ fn correlated_chat_message(
     from: Option<String>,
     conversation_id: &str,
     request_id: &str,
+    assistant_generation: Option<AssistantGeneration>,
 ) -> ChatMessage {
     ChatMessage {
         content,
@@ -24,6 +25,7 @@ fn correlated_chat_message(
         }),
         source: MessageSource::System,
         api_auto_respond: false,
+        assistant_generation,
     }
 }
 
@@ -215,6 +217,7 @@ impl OllamaController {
                                 Some("System".to_string()),
                                 &conversation_id,
                                 &request_id,
+                                None,
                             );
                             send_fn(error_msg);
                             return;
@@ -244,6 +247,7 @@ impl OllamaController {
                                     Some("System".to_string()),
                                     &conversation_id,
                                     &request_id,
+                                    None,
                                 );
                                 send_fn(error_msg);
                                 return;
@@ -289,6 +293,7 @@ impl OllamaController {
                                         Some("System".to_string()),
                                         &conversation_id,
                                         &request_id,
+                                        None,
                                     );
                                     send_fn(chat_error);
                                     return;
@@ -321,6 +326,10 @@ impl OllamaController {
                                                         Some(from_text),
                                                         &conversation_id,
                                                         &request_id,
+                                                        Some(AssistantGeneration {
+                                                            model: model_clone.clone(),
+                                                            num_predict,
+                                                        }),
                                                     );
                                                     let end_record = AuditRecord {
                                                         schema_version: SCHEMA_VERSION,
@@ -363,6 +372,7 @@ impl OllamaController {
                                                         Some("System".to_string()),
                                                         &conversation_id,
                                                         &request_id,
+                                                        None,
                                                     );
                                                     send_fn(error_msg);
                                                 }
@@ -378,6 +388,10 @@ impl OllamaController {
                                                     Some(from_text),
                                                     &conversation_id,
                                                     &request_id,
+                                                    Some(AssistantGeneration {
+                                                        model: model_clone.clone(),
+                                                        num_predict,
+                                                    }),
                                                 );
                                                 let end_record = AuditRecord {
                                                     schema_version: SCHEMA_VERSION,
@@ -421,6 +435,7 @@ impl OllamaController {
                                                 Some("System".to_string()),
                                                 &conversation_id,
                                                 &request_id,
+                                                None,
                                             );
                                             send_fn(error_msg);
                                         }
@@ -446,6 +461,7 @@ impl OllamaController {
                                             Some("System".to_string()),
                                             &conversation_id,
                                             &request_id,
+                                            None,
                                         );
                                         send_fn(error_msg);
                                     }
@@ -471,6 +487,7 @@ impl OllamaController {
                                         Some("System".to_string()),
                                         &conversation_id,
                                         &request_id,
+                                        None,
                                     );
                                     send_fn(error_msg);
                                 }
@@ -502,6 +519,7 @@ impl OllamaController {
                                     Some("System".to_string()),
                                     &conversation_id,
                                     &request_id,
+                                    None,
                                 );
                                 send_fn(error_msg);
                             }
@@ -529,6 +547,7 @@ impl OllamaController {
                             Some("System".to_string()),
                             &conversation_id,
                             &request_id,
+                            None,
                         );
                         send_fn(error_msg);
                     }
