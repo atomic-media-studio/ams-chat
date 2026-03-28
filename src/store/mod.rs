@@ -125,6 +125,13 @@ impl Store {
         Ok(id)
     }
 
+    /// Removes the conversation row; messages and generations cascade.
+    pub fn delete_conversation(&self, id: &str) -> Result<(), StoreError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM conversations WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
     pub fn save_conversation_settings(
         &self,
         id: &str,
