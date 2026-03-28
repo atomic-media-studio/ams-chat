@@ -12,6 +12,8 @@ pub struct MyApp {
     pub selected_model: String,
     server_status: ServerStatus,
     pub server_enabled: Arc<Mutex<bool>>,
+    /// Set once on first frame so Catppuccin Latte replaces default dark styling.
+    theme_applied: bool,
     ollama: OllamaController,
     pub selected_ollama_model: Arc<Mutex<String>>,
     ollama_input_text: String,
@@ -65,6 +67,7 @@ impl Default for MyApp {
             selected_model: String::new(),
             server_status: ServerStatus::Running, // Assume running since server starts before UI
             server_enabled: Arc::new(Mutex::new(true)),
+            theme_applied: false,
             ollama,
             selected_ollama_model: Arc::new(Mutex::new(String::new())),
             ollama_input_text: String::new(),
@@ -98,6 +101,11 @@ impl MyApp {
 
 impl eframe::App for MyApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if !self.theme_applied {
+            catppuccin_egui::set_theme(ctx, catppuccin_egui::LATTE);
+            self.theme_applied = true;
+        }
+
         if self.keyboard_recording {
             let events = ctx.input(|i| i.events.clone());
             for event in events {
@@ -141,26 +149,41 @@ impl eframe::App for MyApp {
             let _right_width = 0.0;
             let available_height = ui.available_height();
             let horizontal_spacing = ui.spacing().item_spacing.x;
-            let center_width =
-                (available_width - (panel_gap * 2.0) - left_width - horizontal_spacing).max(0.0);
+            // Slightly narrower chat column to avoid horizontal overflow (tunable).
+            let center_width = (available_width
+                - (panel_gap * 2.0)
+                - left_width
+                - horizontal_spacing
+                - 16.0)
+                .max(0.0);
                 
             let content_height = (available_height - (panel_gap * 2.0)).max(0.0);
-            
-            let light_gray_bg = egui::Color32::from_rgb(40, 40, 40);
-            let left_inner_margin = 8.0;
+
+            let panel_fill = ui.visuals().panel_fill;
+            let panel_border = egui::Stroke::new(
+                1.0,
+                ui.visuals().widgets.noninteractive.bg_stroke.color,
+            );
+            let left_inner_margin = 8_i8;
             
             ui.add_space(panel_gap);
             ui.horizontal(|ui| {
-                // Left column - 20% width
-                Frame::default()
-                    .fill(light_gray_bg)
-                    .inner_margin(egui::Margin::same(left_inner_margin))
-                    .outer_margin(0.0)
-                    .show(ui, |ui| {
-                        ui.set_min_width(left_width);
-                        ui.set_max_width(left_width);
-                        ui.set_height((content_height - (left_inner_margin * 2.0)).max(0.0));
-                        ui.vertical(|ui| {
+                // Left column: fixed width — does not shrink/grow when switching General vs About.
+                ui.allocate_ui_with_layout(
+                    egui::vec2(left_width, content_height),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        Frame::default()
+                            .fill(panel_fill)
+                            .stroke(panel_border)
+                            .corner_radius(4.0)
+                            .inner_margin(egui::Margin::same(left_inner_margin))
+                            .outer_margin(0.0)
+                            .show(ui, |ui| {
+                                let col_w = ui.available_width();
+                                ui.set_min_width(col_w);
+                                ui.set_max_width(col_w);
+                                ui.vertical(|ui| {
                             // Top bar with tabs
                             ui.horizontal(|ui| {
                                 let general_selected = self.left_column_tab == LeftColumnTab::General;
@@ -207,7 +230,7 @@ impl eframe::App for MyApp {
                                             let ollama_models = self.ollama.models();
                                             let ollama_status_chat = self.ollama.status();
                                             if ollama_status_chat == OllamaStatus::Running && !ollama_models.is_empty() {
-                                                egui::ComboBox::from_id_source("chat_model_selector")
+                                                egui::ComboBox::from_id_salt("chat_model_selector")
                                                     .selected_text(if self.selected_model.is_empty() {
                                                         "Select model"
                                                     } else {
@@ -259,7 +282,7 @@ impl eframe::App for MyApp {
                                                 .default_open(true)
                                                 .show(ui, |ui| {
                                                     ui.horizontal(|ui| {
-                                                        egui::ComboBox::from_id_source("download_chat_format")
+                                                        egui::ComboBox::from_id_salt("download_chat_format")
                                                             .selected_text(match self.download_chat_format {
                                                                 DownloadChatFormat::Json => "JSON",
                                                                 DownloadChatFormat::Csv => "CSV",
@@ -334,7 +357,7 @@ impl eframe::App for MyApp {
                                                 .default_open(true)
                                                 .show(ui, |ui| {
                                                     ui.horizontal(|ui| {
-                                                        egui::ComboBox::from_id_source("download_keyboard_format")
+                                                        egui::ComboBox::from_id_salt("download_keyboard_format")
                                                             .selected_text(match self.download_keyboard_format {
                                                                 DownloadChatFormat::Json => "JSON",
                                                                 DownloadChatFormat::Csv => "CSV",
@@ -411,8 +434,12 @@ impl eframe::App for MyApp {
                                         .default_open(true)
                                         .show(ui, |ui| {
                                             let (status_text, status_color) = match self.server_status {
-                                                ServerStatus::Running => ("● Running", egui::Color32::WHITE),
-                                                ServerStatus::Stopped => ("● Stopped", egui::Color32::GRAY),
+                                                ServerStatus::Running => {
+                                                    ("● Running", ui.visuals().strong_text_color())
+                                                }
+                                                ServerStatus::Stopped => {
+                                                    ("● Stopped", ui.visuals().weak_text_color())
+                                                }
                                             };
 
                                             ui.label(egui::RichText::new(status_text).color(status_color));
@@ -447,9 +474,15 @@ impl eframe::App for MyApp {
                                         .default_open(true)
                                         .show(ui, |ui| {
                                             let (ollama_status_text, ollama_status_color) = match ollama_status {
-                                                OllamaStatus::Running => ("● Running", egui::Color32::WHITE),
-                                                OllamaStatus::Stopped => ("● Stopped", egui::Color32::GRAY),
-                                                OllamaStatus::Checking => ("● Checking", egui::Color32::GRAY),
+                                                OllamaStatus::Running => {
+                                                    ("● Running", ui.visuals().strong_text_color())
+                                                }
+                                                OllamaStatus::Stopped => {
+                                                    ("● Stopped", ui.visuals().weak_text_color())
+                                                }
+                                                OllamaStatus::Checking => {
+                                                    ("● Checking", ui.visuals().weak_text_color())
+                                                }
                                             };
 
                                             ui.label(egui::RichText::new(ollama_status_text).color(ollama_status_color));
@@ -472,7 +505,7 @@ impl eframe::App for MyApp {
                                         .default_open(true)
                                         .show(ui, |ui| {
                                             if ollama_status == OllamaStatus::Running && !models.is_empty() {
-                                                egui::ComboBox::from_id_source("ollama_model_selector")
+                                                egui::ComboBox::from_id_salt("ollama_model_selector")
                                                     .selected_text(if current_model.is_empty() {
                                                         "Select model"
                                                     } else {
@@ -559,8 +592,10 @@ impl eframe::App for MyApp {
                             }
                                 ui.add_space(0.0);
                             });
-                        });
-                
+                            });
+                    },
+                );
+
                 // Center column - 60% width (chat area only)
                 ui.vertical(|ui| {
                     ui.set_min_width(center_width);
@@ -569,7 +604,9 @@ impl eframe::App for MyApp {
                     // Chat area - full height
                     let chat_area_height = content_height;
                     Frame::default()
-                        .fill(light_gray_bg)
+                        .fill(panel_fill)
+                        .stroke(panel_border)
+                        .corner_radius(4.0)
                         .inner_margin(0.0)
                         .outer_margin(0.0)
                         .show(ui, |ui| {

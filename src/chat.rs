@@ -149,8 +149,13 @@ impl ChatExample {
             let top_padding = 22.0; // 12.0 + 10.0 to move pink rectangle 10px down
             let messages_area_height = (available_height - input_panel_height - top_padding - 20.0).max(0.0);
 
-            Frame::none()
-                .inner_margin(egui::Margin { left: 0.0, right: 0.0, top: top_padding, bottom: 0.0 })
+            Frame::NONE
+                .inner_margin(egui::Margin {
+                    left: 0,
+                    right: 0,
+                    top: 22,
+                    bottom: 0,
+                })
                 .show(ui, |ui| {
                     ScrollArea::vertical()
                         .animated(false)
@@ -178,19 +183,19 @@ impl ChatExample {
                                     Frame::default()
                                         .fill(egui::Color32::TRANSPARENT)
                                         .stroke(egui::Stroke::new(1.0, separator_color))
-                                        .rounding(4.0)
-                                        .inner_margin(egui::Margin::same(6.0))
+                                        .corner_radius(4.0)
+                                        .inner_margin(egui::Margin::same(6))
                                         .outer_margin(egui::Margin {
-                                            left: 12.0,
-                                            right: 0.0,
-                                            top: 0.0,
-                                            bottom: 4.0,
+                                            left: 12,
+                                            right: 0,
+                                            top: 0,
+                                            bottom: 4,
                                         })
                                         .show(ui, |ui| {
                                             ui.label(
                                                 egui::RichText::new(timestamp)
                                                     .size(12.0)
-                                                    .color(egui::Color32::WHITE),
+                                                    .color(ui.visuals().strong_text_color()),
                                             );
                                         });
                                     ui.separator();
@@ -207,7 +212,7 @@ impl ChatExample {
                                             let layout = Layout::top_down(Align::Min);
                                             ui.with_layout(layout, |ui| {
                                                 ui.set_max_width(max_msg_width);
-                                                let msg_color = egui::Color32::from_rgb(50, 50, 50);
+                                                let msg_color = ui.visuals().widgets.noninteractive.bg_fill;
                                                 let border_color = match item.from.as_deref() {
                                                     Some("Human") => egui::Color32::from_rgb(0, 255, 0),
                                                     Some(from) if from.starts_with("Ollama") => {
@@ -234,10 +239,10 @@ impl ChatExample {
                                                 let rounding = 4.0;
                                                 let margin = 8.0;
                                                 let outer_margin = egui::Margin {
-                                                    left: left_margin,
-                                                    right: right_margin,
-                                                    top: 0.0,
-                                                    bottom: 4.0,
+                                                    left: left_margin as i8,
+                                                    right: right_margin as i8,
+                                                    top: 0,
+                                                    bottom: 4,
                                                 };
                                                 let content_max_width = max_msg_width - margin * 2.0;
 
@@ -246,17 +251,16 @@ impl ChatExample {
                                                 }
 
                                                 Frame::default()
-                                                    .inner_margin(margin)
+                                                    .inner_margin(egui::Margin::same(margin as i8))
                                                     .outer_margin(outer_margin)
                                                     .fill(msg_color)
-                                                    .rounding(rounding)
+                                                    .corner_radius(rounding)
                                                     .stroke(egui::Stroke::new(border_width, border_color))
                                                     .show(ui, |ui| {
                                                         ui.set_max_width(content_max_width);
                                                         ui.with_layout(Layout::top_down(Align::Min), |ui| {
-                                                            let header_color = egui::Color32::WHITE;
-                                                            let content_color =
-                                                                egui::Color32::from_rgba_unmultiplied(150, 150, 150, 255);
+                                                            let header_color = ui.visuals().strong_text_color();
+                                                            let content_color = ui.visuals().weak_text_color();
 
                                                             if let Some(from) = &item.from {
                                                                 if from.starts_with("Ollama ") {
@@ -264,7 +268,7 @@ impl ChatExample {
                                                                     if parts.len() == 2 {
                                                                         ui.horizontal(|ui| {
                                                                             ui.label(egui::RichText::new("Ollama").strong().color(header_color));
-                                                                            ui.label(egui::RichText::new(parts[1]).color(egui::Color32::DARK_GRAY));
+                                                                            ui.label(egui::RichText::new(parts[1]).color(ui.visuals().weak_text_color()));
                                                                         });
                                                                     } else {
                                                                         ui.label(egui::RichText::new(from).strong().color(header_color));
@@ -311,10 +315,10 @@ impl ChatExample {
 
                             // Text input (26px tall, rounded, vertically centered)
                             let available_for_input = ui.available_width() - 80.0; // Space for button + spacing
-                            let input_frame = Frame::none()
+                            let input_frame = Frame::NONE
                                 .fill(ui.visuals().widgets.inactive.bg_fill)
-                                .rounding(rounding)
-                                .inner_margin(egui::Margin::symmetric(10.0, 3.0)); // Small vertical margin for centering
+                                .corner_radius(rounding)
+                                .inner_margin(egui::Margin::symmetric(10, 3));
                             let response = input_frame
                                 .show(ui, |ui| {
                                     ui.set_height(control_height);
@@ -333,10 +337,10 @@ impl ChatExample {
                             ui.add_space(2.0); // Reduced spacing between input and button
 
                             // Send button (26px tall, rounded, vertically centered)
-                            let button_frame = Frame::none()
+                            let button_frame = Frame::NONE
                                 .fill(ui.visuals().widgets.active.bg_fill)
-                                .rounding(rounding)
-                                .inner_margin(egui::Margin::symmetric(12.0, 3.0)); // Small vertical margin for centering
+                                .corner_radius(rounding)
+                                .inner_margin(egui::Margin::symmetric(12, 3));
                             let send_button_response = button_frame
                                 .show(ui, |ui| {
                                     ui.set_height(control_height);
@@ -388,10 +392,10 @@ impl ChatExample {
                     ui.add_enabled_ui(self.main_input_enabled, |ui| {
                         ui.with_layout(Layout::left_to_right(Align::Min), |ui| {
                             let plus_button_height = 26.0;
-                            let plus_button_frame = Frame::none()
+                            let plus_button_frame = Frame::NONE
                                 .fill(ui.visuals().widgets.inactive.bg_fill)
-                                .rounding(rounding)
-                                .inner_margin(egui::Margin::symmetric(12.0, 3.0));
+                                .corner_radius(rounding)
+                                .inner_margin(egui::Margin::symmetric(12, 3));
                             let plus_button_response = plus_button_frame
                                 .show(ui, |ui| {
                                     ui.set_height(plus_button_height);

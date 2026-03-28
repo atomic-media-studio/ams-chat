@@ -1,6 +1,8 @@
-# ams-chat
+# openchat
 
-A controllable chat application in Rust
+A cross-platform chat application for HCI and Cognitive Sciences.
+
+## Build
 
 ```sh
 # Development: Builds to 'target/debug/'
@@ -10,7 +12,8 @@ cargo run
 cargo build --release
 ```
 
-API:
+## API
+
 - `GET /health` -> returns `OK` when server is enabled.
 - `POST /` with plain text body -> creates chat message from `API`.
 - `POST /` with JSON `{"sender_name":"Agent 1","message":"hello",...}` -> uses `sender_name` + `message`.

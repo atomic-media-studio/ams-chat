@@ -5,9 +5,10 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-eframe = "0.28"
-egui = "0.28"
-egui_inbox = "0.5"
+eframe = "0.33"
+egui = "0.33"
+egui_inbox = "0.10"
+catppuccin-egui = { version = "5.7.0", default-features = false, features = ["egui33"] }
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "time", "io-std"] }
 hyper = { version = "1", features = ["full"] }
 http-body-util = "0.1"
