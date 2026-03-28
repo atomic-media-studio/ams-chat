@@ -1,6 +1,7 @@
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use http_body_util::Full;
 use hyper::body::Bytes;
@@ -15,6 +16,7 @@ use std::sync::mpsc;
 use crate::audit::{self, AuditRecord, SCHEMA_VERSION};
 use crate::chat::{ChatMessage, MessageCorrelation};
 use crate::incoming::MessageSource;
+use crate::ollama::{self, OllamaChatOptions, OllamaMessage};
 
 // Conversation message format from web-agents
 #[derive(Serialize, Deserialize, Debug)]
@@ -40,6 +42,42 @@ struct EvaluatorResult {
     timestamp: String,
     #[serde(default)]
     auto_respond: Option<bool>,
+}
+
+/// OpenAI-compatible chat completion request (local Ollama backend only).
+#[derive(Deserialize, Debug)]
+struct OpenAiChatCompletionRequest {
+    model: String,
+    messages: Vec<OpenAiMessage>,
+    #[serde(default)]
+    max_tokens: Option<u32>,
+    #[serde(default)]
+    temperature: Option<f64>,
+    #[serde(default)]
+    seed: Option<i64>,
+    #[serde(default)]
+    stream: Option<bool>,
+}
+
+#[derive(Deserialize, Debug)]
+struct OpenAiMessage {
+    role: String,
+    #[serde(default)]
+    content: String,
+}
+
+#[derive(Serialize)]
+struct OpenAiModelObject {
+    id: String,
+    object: &'static str,
+    created: u64,
+    owned_by: &'static str,
+}
+
+#[derive(Serialize)]
+struct OpenAiModelsList {
+    object: &'static str,
+    data: Vec<OpenAiModelObject>,
 }
 
 fn auto_respond_from_query(uri: &hyper::Uri) -> bool {
@@ -267,6 +305,186 @@ async fn handle_request(
                 .body(Full::new(Bytes::from(body)))
                 .unwrap())
         }
+        (&Method::POST, "/v1/chat/completions") => {
+            let conversation_id = conversation_id_shared.lock().unwrap().clone();
+            if !is_enabled {
+                return Ok(json_error_response(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "Server is disabled",
+                ));
+            }
+
+            let body_bytes = match http_body_util::BodyExt::collect(req.into_body()).await {
+                Ok(body) => body.to_bytes(),
+                Err(_) => {
+                    return Ok(json_error_response(
+                        StatusCode::BAD_REQUEST,
+                        "Failed to read request body",
+                    ));
+                }
+            };
+
+            let parsed: OpenAiChatCompletionRequest = match serde_json::from_slice(&body_bytes) {
+                Ok(p) => p,
+                Err(e) => {
+                    return Ok(json_error_response(
+                        StatusCode::BAD_REQUEST,
+                        &format!("Invalid JSON: {e}"),
+                    ));
+                }
+            };
+
+            if parsed.stream == Some(true) {
+                return Ok(json_error_response(
+                    StatusCode::BAD_REQUEST,
+                    "Streaming is not supported; send \"stream\": false or omit stream",
+                ));
+            }
+
+            if parsed.messages.is_empty() {
+                return Ok(json_error_response(
+                    StatusCode::BAD_REQUEST,
+                    "messages must be a non-empty array",
+                ));
+            }
+
+            let request_id = audit::new_id();
+            let event_id = audit::new_id();
+            let openai_record = AuditRecord {
+                schema_version: SCHEMA_VERSION,
+                kind: "openai_chat_in",
+                ts: audit::now_rfc3339(),
+                conversation_id: conversation_id.clone(),
+                request_id: request_id.clone(),
+                event_id,
+                details: serde_json::json!({
+                    "model": parsed.model,
+                    "messages_count": parsed.messages.len(),
+                    "max_tokens": parsed.max_tokens,
+                    "temperature": parsed.temperature,
+                    "seed": parsed.seed,
+                    "stream": false,
+                    "endpoint": "/v1/chat/completions",
+                }),
+            };
+            if let Err(e) = audit.append_json_line(&openai_record) {
+                tracing::warn!(error = %e, request_id = %request_id, "openai audit append failed");
+            }
+
+            let model = parsed.model;
+            let model_for_response = model.clone();
+            let messages: Vec<OllamaMessage> = parsed
+                .messages
+                .into_iter()
+                .map(|m| OllamaMessage {
+                    role: m.role.to_lowercase(),
+                    content: m.content,
+                })
+                .collect();
+            let options = OllamaChatOptions {
+                num_predict: parsed.max_tokens.map(|n| n as i32),
+                temperature: parsed.temperature,
+                seed: parsed.seed,
+            };
+
+            let audit_clone = audit.clone();
+            let conv_for_task = conversation_id.clone();
+            let rid = request_id.clone();
+            let join = tokio::task::spawn_blocking(move || {
+                ollama::chat_completion_with_audit(
+                    &model,
+                    &messages,
+                    &options,
+                    audit_clone,
+                    conv_for_task,
+                    rid,
+                )
+            })
+            .await;
+
+            match join {
+                Ok(Ok(parsed_reply)) => {
+                    let created = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
+                    let pt = parsed_reply.prompt_eval_count.unwrap_or(0);
+                    let ct = parsed_reply.eval_count.unwrap_or(0);
+                    let body = serde_json::json!({
+                        "id": format!("chatcmpl-{request_id}"),
+                        "object": "chat.completion",
+                        "created": created,
+                        "model": model_for_response,
+                        "choices": [{
+                            "index": 0,
+                            "message": {
+                                "role": "assistant",
+                                "content": parsed_reply.content,
+                            },
+                            "finish_reason": "stop",
+                        }],
+                        "usage": {
+                            "prompt_tokens": pt,
+                            "completion_tokens": ct,
+                            "total_tokens": pt.saturating_add(ct),
+                        },
+                    });
+                    Ok(Response::builder()
+                        .status(StatusCode::OK)
+                        .header("Content-Type", "application/json")
+                        .body(Full::new(Bytes::from(body.to_string())))
+                        .unwrap())
+                }
+                Ok(Err(err_msg)) => Ok(json_error_response(
+                    StatusCode::BAD_GATEWAY,
+                    &format!("Ollama: {err_msg}"),
+                )),
+                Err(e) => Ok(json_error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("completion task failed: {e}"),
+                )),
+            }
+        }
+        (&Method::GET, "/v1/models") => {
+            if !is_enabled {
+                return Ok(json_error_response(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "Server is disabled",
+                ));
+            }
+            let join = tokio::task::spawn_blocking(|| ollama::list_ollama_models_blocking()).await;
+            match join {
+                Ok(Ok(names)) => {
+                    let data: Vec<OpenAiModelObject> = names
+                        .into_iter()
+                        .map(|id| OpenAiModelObject {
+                            id,
+                            object: "model",
+                            created: 0,
+                            owned_by: "ollama",
+                        })
+                        .collect();
+                    let list = OpenAiModelsList {
+                        object: "list",
+                        data,
+                    };
+                    let body = serde_json::to_string(&list).unwrap_or_else(|_| "{}".into());
+                    Ok(Response::builder()
+                        .status(StatusCode::OK)
+                        .header("Content-Type", "application/json")
+                        .body(Full::new(Bytes::from(body)))
+                        .unwrap())
+                }
+                Ok(Err(e)) => Ok(json_error_response(
+                    StatusCode::BAD_GATEWAY,
+                    &format!("Ollama: {e}"),
+                )),
+                Err(e) => Ok(json_error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("models task failed: {e}"),
+                )),
+            }
+        }
         (&Method::GET, "/health") => {
             if !is_enabled {
                 return Ok(Response::builder()
@@ -281,4 +499,25 @@ async fn handle_request(
             .body(Full::new(Bytes::from("Not Found")))
             .unwrap()),
     }
+}
+
+fn json_error_response(status: StatusCode, message: &str) -> Response<Full<Bytes>> {
+    let err_type = if status.is_client_error() {
+        "invalid_request_error"
+    } else {
+        "server_error"
+    };
+    let body = serde_json::json!({
+        "error": {
+            "message": message,
+            "type": err_type,
+            "param": null,
+            "code": null,
+        }
+    });
+    Response::builder()
+        .status(status)
+        .header("Content-Type", "application/json")
+        .body(Full::new(Bytes::from(body.to_string())))
+        .unwrap()
 }
