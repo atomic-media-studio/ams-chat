@@ -14,6 +14,7 @@ use std::sync::mpsc;
 
 use crate::audit::{self, AuditRecord, SCHEMA_VERSION};
 use crate::chat::{ChatMessage, MessageCorrelation};
+use crate::incoming::MessageSource;
 
 // Conversation message format from web-agents
 #[derive(Serialize, Deserialize, Debug)]
@@ -25,6 +26,9 @@ struct ConversationMessage {
     topic: String,
     message: String,
     timestamp: String,
+    /// When present, overrides the `?auto_respond=` query flag for this request.
+    #[serde(default)]
+    auto_respond: Option<bool>,
 }
 
 // Evaluator result format from web-agents (Agent Evaluator)
@@ -34,6 +38,22 @@ struct EvaluatorResult {
     sentiment: String,
     message: String,
     timestamp: String,
+    #[serde(default)]
+    auto_respond: Option<bool>,
+}
+
+fn auto_respond_from_query(uri: &hyper::Uri) -> bool {
+    uri.query().map_or(false, |q| {
+        for pair in q.split('&') {
+            let mut parts = pair.splitn(2, '=');
+            let key = parts.next().unwrap_or("");
+            if key == "auto_respond" {
+                let v = parts.next().unwrap_or("");
+                return v.eq_ignore_ascii_case("true") || v == "1";
+            }
+        }
+        false
+    })
 }
 
 /// Start the HTTP server that receives POST requests
@@ -97,6 +117,8 @@ async fn handle_request(
                     .unwrap());
             }
 
+            let query_auto_respond = auto_respond_from_query(req.uri());
+
             let request_id = audit::new_id();
             let event_id = audit::new_id();
 
@@ -117,13 +139,18 @@ async fn handle_request(
                 "received POST body"
             );
 
-            let (message, payload_kind, audit_ts) =
+            let (message, payload_kind, audit_ts, api_auto_respond_effective) =
                 match serde_json::from_str::<ConversationMessage>(&body_str) {
                     Ok(conv_msg) => {
                         let ts = audit::resolve_from_optional_payload(Some(conv_msg.timestamp.as_str()));
+                        let api_auto =
+                            conv_msg
+                                .auto_respond
+                                .unwrap_or(query_auto_respond);
                         tracing::info!(
                             request_id = %request_id,
                             sender = %conv_msg.sender_name,
+                            auto_respond = api_auto,
                             "parsed conversation JSON"
                         );
                         (
@@ -136,18 +163,25 @@ async fn handle_request(
                                     request_id: request_id.clone(),
                                     timestamp_rfc3339: ts.clone(),
                                 }),
+                                source: MessageSource::Api,
+                                api_auto_respond: api_auto,
                             },
                             "conversation",
                             ts,
+                            api_auto,
                         )
                     }
                     Err(_) => match serde_json::from_str::<EvaluatorResult>(&body_str) {
                         Ok(eval_result) => {
                             let ts = audit::resolve_from_optional_payload(Some(eval_result.timestamp.as_str()));
+                            let api_auto = eval_result
+                                .auto_respond
+                                .unwrap_or(query_auto_respond);
                             tracing::info!(
                                 request_id = %request_id,
                                 evaluator = %eval_result.evaluator_name,
                                 sentiment = %eval_result.sentiment,
+                                auto_respond = api_auto,
                                 "parsed evaluator JSON"
                             );
                             (
@@ -163,13 +197,17 @@ async fn handle_request(
                                         request_id: request_id.clone(),
                                         timestamp_rfc3339: ts.clone(),
                                     }),
+                                    source: MessageSource::Api,
+                                    api_auto_respond: api_auto,
                                 },
                                 "evaluator",
                                 ts,
+                                api_auto,
                             )
                         }
                         Err(_) => {
                             let ts = audit::resolve_from_optional_payload(None);
+                            let api_auto = query_auto_respond;
                             (
                                 ChatMessage {
                                     content: body_str.to_string(),
@@ -180,9 +218,12 @@ async fn handle_request(
                                         request_id: request_id.clone(),
                                         timestamp_rfc3339: ts.clone(),
                                     }),
+                                    source: MessageSource::Api,
+                                    api_auto_respond: api_auto,
                                 },
                                 "plain",
                                 ts,
+                                api_auto,
                             )
                         }
                     },
@@ -198,6 +239,8 @@ async fn handle_request(
                 details: serde_json::json!({
                     "body_len": body_bytes.len(),
                     "payload_kind": payload_kind,
+                    "auto_respond": api_auto_respond_effective,
+                    "query_auto_respond": query_auto_respond,
                 }),
             };
             if let Err(e) = audit.append_json_line(&record) {
@@ -210,6 +253,7 @@ async fn handle_request(
                 "status": "ok",
                 "message": "Message received",
                 "request_id": request_id,
+                "auto_respond": api_auto_respond_effective,
             })
             .to_string();
 

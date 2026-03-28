@@ -3,6 +3,7 @@ use egui::Frame;
 
 use crate::audit::AuditHandle;
 use crate::chat::ChatExample;
+use crate::incoming::MessageSource;
 use crate::ollama::{OllamaController, OllamaStatus};
 
 use std::sync::{Arc, Mutex};
@@ -574,6 +575,8 @@ impl eframe::App for MyApp {
                                                         content: format!("Testing Ollama API: {}", message),
                                                         from: Some("System".to_string()),
                                                         correlation: None,
+                                                        source: MessageSource::System,
+                                                        api_auto_respond: false,
                                                     };
                                                     tx.send(system_message).ok();
                                                     let request_id = crate::audit::new_id();
@@ -647,6 +650,8 @@ impl eframe::App for MyApp {
                                         content: "Please select Ollama Model.".to_string(),
                                         from: Some("System".to_string()),
                                         correlation: None,
+                                        source: MessageSource::System,
+                                        api_auto_respond: false,
                                     };
                                     tx_clone.send(bot_message).ok();
                                 } else if ollama_status == crate::ollama::OllamaStatus::Running {
@@ -677,6 +682,8 @@ impl eframe::App for MyApp {
                                         content: "Ollama is not running. Please check Ollama status.".to_string(),
                                         from: Some("System".to_string()),
                                         correlation: None,
+                                        source: MessageSource::System,
+                                        api_auto_respond: false,
                                     };
                                     tx_clone.send(bot_message).ok();
                                 }

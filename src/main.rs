@@ -1,6 +1,7 @@
 mod app;
 mod audit;
 mod chat;
+mod incoming;
 mod ollama;
 mod server;
 

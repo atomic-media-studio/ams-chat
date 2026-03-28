@@ -6,6 +6,8 @@ use egui_inbox::UiInbox;
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 
+use crate::incoming::{should_dispatch_to_model, MessageSource};
+
 #[derive(Debug, Clone)]
 pub struct MessageCorrelation {
     /// Carried for audit/export; IDs are also written to JSONL from server/ollama paths.
@@ -23,6 +25,9 @@ pub struct ChatMessage {
     pub content: String,
     pub from: Option<String>,
     pub correlation: Option<MessageCorrelation>,
+    pub source: MessageSource,
+    /// For [`MessageSource::Api`] only: when `true`, run the same Ollama pipeline as UI input. Default `false`.
+    pub api_auto_respond: bool,
 }
 
 #[derive(Debug)]
@@ -90,6 +95,8 @@ impl ChatExample {
                 content: "ams-chat Started".to_string(),
                 from: Some("System".to_string()),
                 correlation: None,
+                source: MessageSource::System,
+                api_auto_respond: false,
             }
         ];
 
@@ -152,11 +159,17 @@ impl ChatExample {
     pub fn ui(&mut self, ui: &mut Ui) {
         // Read incoming messages from inbox
         self.inbox.read(ui).for_each(|message| {
-            // Only add non-empty messages to prevent spacing issues
             if !message.content.trim().is_empty() {
                 let ts = Self::display_time_for_message(&message);
+                let run_handler = should_dispatch_to_model(message.source, message.api_auto_respond);
+                let text_for_model = message.content.clone();
                 self.messages.push(message);
                 self.message_timestamps.push(ts);
+                if run_handler {
+                    if let Some(handler) = &self.message_handler {
+                        handler(text_for_model);
+                    }
+                }
             }
         });
 
@@ -398,6 +411,8 @@ impl ChatExample {
                                     content: message_text.clone(),
                                     from: Some("Human".to_string()),
                                     correlation: None,
+                                    source: MessageSource::Human,
+                                    api_auto_respond: false,
                                 };
                                 self.messages.push(user_message);
                                 self.message_timestamps.push(Self::current_timestamp_string());
@@ -412,6 +427,8 @@ impl ChatExample {
                                         content: "Please select a model".to_string(),
                                         from: Some("System".to_string()),
                                         correlation: None,
+                                        source: MessageSource::System,
+                                        api_auto_respond: false,
                                     };
                                     tx.send(bot_message).ok();
                                 }

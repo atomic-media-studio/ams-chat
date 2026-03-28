@@ -3,6 +3,7 @@ use std::time::Duration;
 
 use crate::audit::{self, AuditHandle, AuditRecord, SCHEMA_VERSION};
 use crate::chat::{ChatMessage, MessageCorrelation};
+use crate::incoming::MessageSource;
 
 const OLLAMA_URL: &str = "http://127.0.0.1:11434";
 
@@ -21,6 +22,8 @@ fn correlated_chat_message(
             request_id: request_id.to_string(),
             timestamp_rfc3339: audit::now_rfc3339(),
         }),
+        source: MessageSource::System,
+        api_auto_respond: false,
     }
 }
 
