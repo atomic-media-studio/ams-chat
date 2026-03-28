@@ -8,7 +8,8 @@ Cross-platform desktop chat for HCI and cognitive science workflows.
 - **Ollama** integration: model selection, optional token limits, and local inference.
 - **HTTP API** on `127.0.0.1:3000` for inbound agent and evaluator messages plus health checks.
 - **Audit trail**: append-only JSONL (`openchat-audit.jsonl`) with correlation IDs; structured logs via `tracing` (`RUST_LOG`).
-- **Export**: chat and keyboard logs as JSON or CSV for analysis.
+- **SQLite** (`openchat.db` in the working directory): durable conversations, messages, per-assistant generation metadata (model / `num_predict`), and session settings.
+- **Export**: chat and keyboard logs as JSON or CSV; **Export / Import JSON** in the sidebar for full conversation snapshots.
 
 ## Build
 

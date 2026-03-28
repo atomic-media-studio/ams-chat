@@ -5,6 +5,7 @@ use crate::audit::AuditHandle;
 use crate::chat::ChatExample;
 use crate::incoming::MessageSource;
 use crate::ollama::{OllamaController, OllamaStatus};
+use crate::store::{ConversationSettings, ConversationSummary, Store};
 
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -12,8 +13,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub struct MyApp {
     pub chat: ChatExample,
     pub selected_model: String,
-    pub conversation_id: String,
+    /// Active conversation; shared with the HTTP server for inbound message attribution.
+    pub conversation_id: Arc<Mutex<String>>,
+    pub store: Arc<Store>,
     pub audit: Arc<AuditHandle>,
+    conversation_list: Vec<ConversationSummary>,
+    conversation_pick: String,
+    last_saved_settings: Option<ConversationSettings>,
     server_status: ServerStatus,
     pub server_enabled: Arc<Mutex<bool>>,
     /// Set once on first frame so Catppuccin Latte replaces default dark styling.
@@ -69,8 +75,12 @@ impl Default for MyApp {
         Self {
             chat: ChatExample::default(),
             selected_model: String::new(),
-            conversation_id: String::new(),
+            conversation_id: Arc::new(Mutex::new(String::new())),
+            store: Arc::new(Store::open(":memory:").expect("in-memory store")),
             audit: Arc::new(crate::audit::AuditHandle::disabled()),
+            conversation_list: Vec::new(),
+            conversation_pick: String::new(),
+            last_saved_settings: None,
             server_status: ServerStatus::Running, // Assume running since server starts before UI
             server_enabled: Arc::new(Mutex::new(true)),
             theme_applied: false,
@@ -92,6 +102,30 @@ impl Default for MyApp {
 }
 
 impl MyApp {
+    pub fn conv_id(&self) -> String {
+        self.conversation_id.lock().unwrap().clone()
+    }
+
+    pub fn apply_loaded_settings(&mut self, s: ConversationSettings) {
+        self.selected_model = s.selected_model.clone();
+        *self.selected_ollama_model.lock().unwrap() = s.selected_model.clone();
+        self.chat_token_limit = s.chat_token_limit;
+        self.chat_token_limit_enabled = s.chat_token_limit_enabled;
+        self.ollama_token_limit = s.ollama_token_limit;
+        self.ollama_token_limit_enabled = s.ollama_token_limit_enabled;
+        self.last_saved_settings = Some(s);
+    }
+
+    fn snapshot_settings(&self) -> ConversationSettings {
+        ConversationSettings {
+            selected_model: self.selected_model.clone(),
+            chat_token_limit: self.chat_token_limit,
+            chat_token_limit_enabled: self.chat_token_limit_enabled,
+            ollama_token_limit: self.ollama_token_limit,
+            ollama_token_limit_enabled: self.ollama_token_limit_enabled,
+        }
+    }
+
     fn current_timestamp_string() -> String {
         let now_secs = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -110,6 +144,28 @@ impl eframe::App for MyApp {
         if !self.theme_applied {
             catppuccin_egui::set_theme(ctx, catppuccin_egui::LATTE);
             self.theme_applied = true;
+        }
+
+        self.conversation_list = self.store.list_conversations(50).unwrap_or_default();
+        if self.conversation_pick.is_empty() {
+            self.conversation_pick = self.conv_id();
+        }
+
+        let store_commit = self.store.clone();
+        let conv_arc = self.conversation_id.clone();
+        self.chat.set_message_commit_hook(Some(Box::new(move |msg, ts| {
+            let id = conv_arc.lock().unwrap().clone();
+            if let Err(e) = store_commit.append_message(&id, msg, ts) {
+                tracing::warn!(error = %e, "sqlite persist failed");
+            }
+        })));
+
+        let snap = self.snapshot_settings();
+        if self.last_saved_settings.as_ref() != Some(&snap) {
+            if let Err(e) = self.store.save_conversation_settings(&self.conv_id(), &snap) {
+                tracing::warn!(error = %e, "sqlite settings save failed");
+            }
+            self.last_saved_settings = Some(snap);
         }
 
         if self.keyboard_recording {
@@ -427,8 +483,112 @@ impl eframe::App for MyApp {
                                                     });
                                                 });
                                             ui.add_space(4.0);
-                                            if ui.button("Clear Chat").clicked() {
-                                                self.chat.clear_messages();
+                                            ui.label(egui::RichText::new("Conversations").small().strong());
+                                            ui.horizontal(|ui| {
+                                                if ui.button("New").clicked() {
+                                                    match self.store.create_conversation() {
+                                                        Ok(id) => {
+                                                            *self.conversation_id.lock().unwrap() = id.clone();
+                                                            self.conversation_pick = id.clone();
+                                                            self.chat.reset_to_welcome();
+                                                            let (w, t) = ChatExample::default_welcome();
+                                                            let _ = self.store.append_message(&id, &w, &t);
+                                                            if let Ok(s) = self.store.load_conversation_settings(&id) {
+                                                                self.apply_loaded_settings(s);
+                                                            }
+                                                        }
+                                                        Err(e) => tracing::warn!(error = %e, "create conversation"),
+                                                    }
+                                                }
+                                                egui::ComboBox::from_id_salt("conv_pick")
+                                                    .width(120.0)
+                                                    .selected_text(if self.conversation_pick.len() > 8 {
+                                                        format!("{}…", &self.conversation_pick[..8])
+                                                    } else {
+                                                        self.conversation_pick.clone()
+                                                    })
+                                                    .show_ui(ui, |ui| {
+                                                        let conv_list = self.conversation_list.clone();
+                                                        for c in &conv_list {
+                                                            let label = if c.id.len() > 8 {
+                                                                format!(
+                                                                    "{}… · {}",
+                                                                    &c.id[..8],
+                                                                    &c.updated_at
+                                                                )
+                                                            } else {
+                                                                format!("{} · {}", c.id, c.updated_at)
+                                                            };
+                                                            if ui
+                                                                .selectable_label(self.conv_id() == c.id, label)
+                                                                .clicked()
+                                                            {
+                                                                match self.store.load_messages(&c.id) {
+                                                                    Ok((msgs, ts)) => {
+                                                                        *self.conversation_id.lock().unwrap() =
+                                                                            c.id.clone();
+                                                                        self.conversation_pick = c.id.clone();
+                                                                        self.chat.hydrate(msgs, ts);
+                                                                        if let Ok(s) =
+                                                                            self.store.load_conversation_settings(&c.id)
+                                                                        {
+                                                                            self.apply_loaded_settings(s);
+                                                                        }
+                                                                    }
+                                                                    Err(e) => {
+                                                                        tracing::warn!(error = %e, "load messages")
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    });
+                                            });
+                                            ui.horizontal(|ui| {
+                                                if ui.button("Export JSON…").clicked() {
+                                                    match self.store.export_conversation_json(&self.conv_id()) {
+                                                        Ok(json) => {
+                                                            if let Some(path) = rfd::FileDialog::new()
+                                                                .set_file_name("conversation.json")
+                                                                .save_file()
+                                                            {
+                                                                if let Err(err) = std::fs::write(path, json) {
+                                                                    tracing::warn!(error = %err, "export write");
+                                                                }
+                                                            }
+                                                        }
+                                                        Err(e) => tracing::warn!(error = %e, "export"),
+                                                    }
+                                                }
+                                                if ui.button("Import JSON…").clicked() {
+                                                    if let Some(path) = rfd::FileDialog::new().pick_file() {
+                                                        match std::fs::read_to_string(path) {
+                                                            Ok(s) => {
+                                                                match self.store.import_conversation_json(&s) {
+                                                                    Ok(new_id) => {
+                                                                        *self.conversation_id.lock().unwrap() =
+                                                                            new_id.clone();
+                                                                        self.conversation_pick = new_id.clone();
+                                                                        match self.store.load_messages(&new_id) {
+                                                                            Ok((m, t)) => {
+                                                                                self.chat.hydrate(m, t);
+                                                                            }
+                                                                            Err(e) => tracing::warn!(error = %e, "load after import"),
+                                                                        }
+                                                                    }
+                                                                    Err(e) => tracing::warn!(error = %e, "import"),
+                                                                }
+                                                            }
+                                                            Err(e) => tracing::warn!(error = %e, "read import file"),
+                                                        }
+                                                    }
+                                                }
+                                            });
+                                            if ui.button("Clear chat").clicked() {
+                                                let id = self.conv_id();
+                                                let _ = self.store.delete_messages_for_conversation(&id);
+                                                self.chat.reset_to_welcome();
+                                                let (w, t) = ChatExample::default_welcome();
+                                                let _ = self.store.append_message(&id, &w, &t);
                                             }
                                         });
 
@@ -577,6 +737,7 @@ impl eframe::App for MyApp {
                                                         correlation: None,
                                                         source: MessageSource::System,
                                                         api_auto_respond: false,
+                                                        assistant_generation: None,
                                                     };
                                                     tx.send(system_message).ok();
                                                     let request_id = crate::audit::new_id();
@@ -585,7 +746,7 @@ impl eframe::App for MyApp {
                                                         message,
                                                         token_limit,
                                                         self.audit.clone(),
-                                                        self.conversation_id.clone(),
+                                                        self.conv_id(),
                                                         request_id,
                                                         Box::new(move |msg| {
                                                             tx.send(msg).ok();
@@ -652,6 +813,7 @@ impl eframe::App for MyApp {
                                         correlation: None,
                                         source: MessageSource::System,
                                         api_auto_respond: false,
+                                        assistant_generation: None,
                                     };
                                     tx_clone.send(bot_message).ok();
                                 } else if ollama_status == crate::ollama::OllamaStatus::Running {
@@ -668,7 +830,7 @@ impl eframe::App for MyApp {
                                         message,
                                         chat_token_limit,
                                         audit_for_chat.clone(),
-                                        conversation_for_chat.clone(),
+                                        conversation_for_chat.lock().unwrap().clone(),
                                         request_id,
                                         Box::new(move |msg| {
                                             // Clear waiting flag when response arrives
@@ -684,6 +846,7 @@ impl eframe::App for MyApp {
                                         correlation: None,
                                         source: MessageSource::System,
                                         api_auto_respond: false,
+                                        assistant_generation: None,
                                     };
                                     tx_clone.send(bot_message).ok();
                                 }

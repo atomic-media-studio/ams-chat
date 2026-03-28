@@ -62,7 +62,7 @@ pub async fn start_server(
     sender: mpsc::Sender<ChatMessage>,
     enabled: Arc<Mutex<bool>>,
     audit: Arc<audit::AuditHandle>,
-    conversation_id: String,
+    conversation_id: Arc<Mutex<String>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let listener = TcpListener::bind(addr).await?;
     tracing::info!(addr = %addr, "HTTP server listening");
@@ -73,7 +73,7 @@ pub async fn start_server(
         let sender_clone = sender.clone();
         let enabled_clone = enabled.clone();
         let audit_clone = audit.clone();
-        let conversation_id_clone = conversation_id.clone();
+        let conversation_id_shared = conversation_id.clone();
 
         tokio::task::spawn(async move {
             if let Err(err) = http1::Builder::new()
@@ -85,7 +85,7 @@ pub async fn start_server(
                             sender_clone.clone(),
                             enabled_clone.clone(),
                             audit_clone.clone(),
-                            conversation_id_clone.clone(),
+                            conversation_id_shared.clone(),
                         )
                     }),
                 )
@@ -102,12 +102,13 @@ async fn handle_request(
     sender: mpsc::Sender<ChatMessage>,
     enabled: Arc<Mutex<bool>>,
     audit: Arc<audit::AuditHandle>,
-    conversation_id: String,
+    conversation_id_shared: Arc<Mutex<String>>,
 ) -> Result<Response<Full<Bytes>>, Infallible> {
     let is_enabled = *enabled.lock().unwrap();
 
     match (req.method(), req.uri().path()) {
         (&Method::POST, "/") => {
+            let conversation_id = conversation_id_shared.lock().unwrap().clone();
             if !is_enabled {
                 return Ok(Response::builder()
                     .status(StatusCode::SERVICE_UNAVAILABLE)
@@ -165,6 +166,7 @@ async fn handle_request(
                                 }),
                                 source: MessageSource::Api,
                                 api_auto_respond: api_auto,
+                                assistant_generation: None,
                             },
                             "conversation",
                             ts,
@@ -199,6 +201,7 @@ async fn handle_request(
                                     }),
                                     source: MessageSource::Api,
                                     api_auto_respond: api_auto,
+                                    assistant_generation: None,
                                 },
                                 "evaluator",
                                 ts,
@@ -220,6 +223,7 @@ async fn handle_request(
                                     }),
                                     source: MessageSource::Api,
                                     api_auto_respond: api_auto,
+                                    assistant_generation: None,
                                 },
                                 "plain",
                                 ts,

@@ -4,6 +4,7 @@ mod chat;
 mod incoming;
 mod ollama;
 mod server;
+mod store;
 
 use std::net::SocketAddr;
 use std::sync::{mpsc, Arc, Mutex};
@@ -15,7 +16,24 @@ fn main() -> eframe::Result<()> {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
 
-    let conversation_id = audit::new_id();
+    let store = match store::Store::open("openchat.db") {
+        Ok(s) => Arc::new(s),
+        Err(e) => {
+            tracing::error!(error = %e, "failed to open openchat.db");
+            std::process::exit(1);
+        }
+    };
+
+    let (conv_id, msgs, ts, settings) = match store.bootstrap_or_load() {
+        Ok(x) => x,
+        Err(e) => {
+            tracing::error!(error = %e, "database bootstrap failed");
+            std::process::exit(1);
+        }
+    };
+
+    let conversation_id = Arc::new(Mutex::new(conv_id.clone()));
+
     let audit_handle: Arc<audit::AuditHandle> = match audit::AuditHandle::open("openchat-audit.jsonl") {
         Ok(h) => Arc::new(h),
         Err(e) => {
@@ -23,17 +41,29 @@ fn main() -> eframe::Result<()> {
             Arc::new(audit::AuditHandle::disabled())
         }
     };
-    tracing::info!(conversation_id = %conversation_id, path = ?audit_handle.path(), "ams-chat startup");
+    tracing::info!(
+        conversation_id = %conv_id,
+        path = ?audit_handle.path(),
+        db = ?store.path(),
+        "ams-chat startup"
+    );
+
+    let mut chat = ChatExample::new();
+    if !msgs.is_empty() {
+        chat.hydrate(msgs, ts);
+    } else {
+        let (w, t) = ChatExample::default_welcome();
+        if let Err(e) = store.append_message(&conv_id, &w, &t) {
+            tracing::warn!(error = %e, "failed to persist welcome message");
+        }
+    }
 
     // Create a channel to bridge HTTP server and UI inbox
     let (tx, rx) = mpsc::channel::<ChatMessage>();
-    
+
     // Create shared flag for server enable/disable
     let server_enabled = Arc::new(Mutex::new(true));
-    
-    // Create chat instance
-    let chat = ChatExample::new();
-    
+
     // Spawn a task to forward messages from HTTP server to UI inbox
     let inbox_sender = chat.inbox().sender();
     std::thread::spawn(move || {
@@ -41,7 +71,7 @@ fn main() -> eframe::Result<()> {
             inbox_sender.send(msg).ok();
         }
     });
-    
+
     // Start HTTP server in background
     let server_tx = tx.clone();
     let server_enabled_clone = server_enabled.clone();
@@ -76,6 +106,8 @@ fn main() -> eframe::Result<()> {
     let server_enabled_for_app = server_enabled.clone();
     let app_audit = audit_handle.clone();
     let app_conversation_id = conversation_id.clone();
+    let app_store = store.clone();
+    let app_settings = settings;
     eframe::run_native(
         "ams-chat",
         options,
@@ -85,6 +117,8 @@ fn main() -> eframe::Result<()> {
             app.server_enabled = server_enabled_for_app;
             app.audit = app_audit;
             app.conversation_id = app_conversation_id;
+            app.store = app_store;
+            app.apply_loaded_settings(app_settings);
             Ok(Box::new(app))
         }),
     )
