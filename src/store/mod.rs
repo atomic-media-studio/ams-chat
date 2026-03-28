@@ -3,6 +3,7 @@
 mod export;
 mod schema;
 
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -17,6 +18,7 @@ pub use schema::USER_VERSION;
 
 #[derive(Debug)]
 pub enum StoreError {
+    Io(io::Error),
     Sqlite(rusqlite::Error),
     Json(serde_json::Error),
 }
@@ -24,6 +26,7 @@ pub enum StoreError {
 impl std::fmt::Display for StoreError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            StoreError::Io(e) => write!(f, "{e}"),
             StoreError::Sqlite(e) => write!(f, "{e}"),
             StoreError::Json(e) => write!(f, "{e}"),
         }
@@ -31,6 +34,12 @@ impl std::fmt::Display for StoreError {
 }
 
 impl std::error::Error for StoreError {}
+
+impl From<io::Error> for StoreError {
+    fn from(e: io::Error) -> Self {
+        StoreError::Io(e)
+    }
+}
 
 impl From<rusqlite::Error> for StoreError {
     fn from(e: rusqlite::Error) -> Self {
@@ -78,8 +87,14 @@ pub struct Store {
 }
 
 impl Store {
+    /// Opens the SQLite database, creating the file (and parent directories) if they do not exist.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
         let path = path.as_ref().to_path_buf();
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent)?;
+            }
+        }
         let conn = Connection::open(&path)?;
         let ver: i32 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))

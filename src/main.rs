@@ -19,7 +19,7 @@ fn main() -> eframe::Result<()> {
     let store = match store::Store::open("openchat.db") {
         Ok(s) => Arc::new(s),
         Err(e) => {
-            tracing::error!(error = %e, "failed to open openchat.db");
+            tracing::error!(error = %e, "failed to create or open openchat.db");
             std::process::exit(1);
         }
     };
